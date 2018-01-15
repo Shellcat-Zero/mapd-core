@@ -70,12 +70,6 @@ const std::string MapDQLRelease(MAPD_RELEASE);
 
 using boost::shared_ptr;
 
-void completion(const char* buf, linenoiseCompletions* lc) {
-  if (toupper(buf[0]) == 'S') {
-    linenoiseAddCompletion(lc, "SELECT ");
-  }
-}
-
 #define INVALID_SESSION_ID ""
 #define MAPD_ROOT_USER "mapd"
 #define MAPD_DEFAULT_ROOT_USER_ROLE "mapd_default_suser_role"
@@ -136,6 +130,7 @@ struct ClientContext {
   std::vector<TDBObject> db_objects;
   std::string license_key;
   TLicenseInfo license_info;
+  std::vector<TCompletionHint> completion_hints;
 
   ClientContext(TTransport& t, MapDClient& c)
       : transport(t), client(c), session(INVALID_SESSION_ID), execution_mode(TExecuteMode::GPU) {}
@@ -174,7 +169,8 @@ enum ThriftService {
   kGET_ROLES_FOR_USER,
   kGET_HARDWARE_INFO,
   kSET_LICENSE_KEY,
-  kGET_LICENSE_CLAIMS
+  kGET_LICENSE_CLAIMS,
+  kGET_COMPLETION_HINTS
 };
 
 namespace {
@@ -289,6 +285,9 @@ bool thrift_with_retry(ThriftService which_service, ClientContext& context, cons
       case kGET_LICENSE_CLAIMS:
         context.client.get_license_claims(context.license_info, context.session, "");
         break;
+      case kGET_COMPLETION_HINTS:
+        context.client.get_completion_hints(context.completion_hints, context.session, arg, -1);
+        break;
     }
   } catch (TMapDException& e) {
     std::cerr << e.error_msg << std::endl;
@@ -317,6 +316,21 @@ struct DoNothing {
   template <typename... T>
   void operator()(T&&... t) {}
 };
+
+ClientContext* g_client_context_ptr{nullptr};
+
+void completion(const char* buf, linenoiseCompletions* lc) {
+  CHECK(g_client_context_ptr);
+  thrift_with_retry(kGET_COMPLETION_HINTS, *g_client_context_ptr, buf);
+  for (const auto& completion_hint : g_client_context_ptr->completion_hints) {
+    for (const auto& hint_str : completion_hint.hints) {
+      CHECK_LE(completion_hint.replaced.size(), strlen(buf));
+      std::string partial_query(buf, buf + strlen(buf) - completion_hint.replaced.size());
+      partial_query += hint_str;
+      linenoiseAddCompletion(lc, partial_query.c_str());
+    }
+  }
+}
 }
 
 template <ThriftService THRIFT_SERVICE, typename ON_SUCCESS_LAMBDA = DoNothing>
@@ -1762,6 +1776,7 @@ int main(int argc, char** argv) {
   }
   MapDClient c(protocol);
   ClientContext context(*transport, c);
+  g_client_context_ptr = &context;
 
   context.db_name = db_name;
   context.user_name = user_name;
